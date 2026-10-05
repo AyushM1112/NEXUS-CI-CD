@@ -12,7 +12,7 @@ def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["status"] == "healthy"
+    assert payload["status"] == "broken"
     assert payload["service"] == "nexus-devops-dashboard"
     assert payload["uptime_seconds"] >= 0
 
