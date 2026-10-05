@@ -4,8 +4,8 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 10, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '15'))
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     environment {
@@ -15,6 +15,7 @@ pipeline {
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
@@ -23,30 +24,34 @@ pipeline {
 
         stage('Install') {
             steps {
-                sh '''
-                    set -eux
-                    python3 --version
-                    python3 -m venv .venv
-                    .venv/bin/pip install --upgrade pip
-                    .venv/bin/pip install -r requirements.txt
-                    mkdir -p reports
+                bat '''
+                    if not exist .venv (
+                        python -m venv .venv
+                    )
+
+                    .venv\\Scripts\\python.exe -m pip install --upgrade pip
+                    .venv\\Scripts\\python.exe -m pip install -r requirements.txt
                 '''
             }
         }
 
         stage('Test') {
             parallel {
+
                 stage('Application Tests') {
                     steps {
-                        sh '''
-                            .venv/bin/pytest -q tests/test_app.py --junitxml=reports/application-tests.xml
+                        bat '''
+                            if not exist reports mkdir reports
+                            .venv\\Scripts\\python.exe -m pytest tests\\test_app.py --junitxml=reports\\application-tests.xml
                         '''
                     }
                 }
+
                 stage('Jenkins Integration Tests') {
                     steps {
-                        sh '''
-                            .venv/bin/pytest -q tests/test_jenkins_config.py --junitxml=reports/jenkins-tests.xml
+                        bat '''
+                            if not exist reports mkdir reports
+                            .venv\\Scripts\\python.exe -m pytest tests\\test_jenkins_config.py --junitxml=reports\\jenkins-tests.xml
                         '''
                     }
                 }
@@ -55,35 +60,48 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                sh '''
-                    set -eux
-                    docker build                       --label "org.opencontainers.image.revision=${GIT_COMMIT}"                       --label "org.opencontainers.image.version=${BUILD_NUMBER}"                       -t "${IMAGE_NAME}:${BUILD_NUMBER}"                       -t "${IMAGE_NAME}:latest" .
+                bat '''
+                    docker build ^
+                        -t %IMAGE_NAME%:%BUILD_NUMBER% ^
+                        -t %IMAGE_NAME%:latest ^
+                        --label com.nexus.jenkins.build=%BUILD_NUMBER% ^
+                        .
                 '''
             }
         }
 
         stage('Deploy') {
             steps {
-                sh '''
-                    set -eux
-                    docker rm -f "${CONTAINER_NAME}" || true
-                    docker run -d                       --name "${CONTAINER_NAME}"                       -p "${APP_PORT}:5000"                       --restart unless-stopped                       "${IMAGE_NAME}:${BUILD_NUMBER}"
+                bat '''
+                    docker rm -f %CONTAINER_NAME% 2>nul || exit /b 0
+
+                    docker run -d ^
+                        --name %CONTAINER_NAME% ^
+                        -p %APP_PORT%:5000 ^
+                        %IMAGE_NAME%:%BUILD_NUMBER%
                 '''
             }
         }
 
         stage('Health Check') {
             steps {
-                sh '''
-                    set -eux
-                    for i in $(seq 1 15); do
-                      if curl -fsS "http://127.0.0.1:${APP_PORT}/health"; then
-                        exit 0
-                      fi
-                      sleep 2
-                    done
-                    docker logs "${CONTAINER_NAME}" || true
-                    exit 1
+                bat '''
+                    echo Checking NEXUS application health...
+
+                    for /L %%i in (1,1,20) do (
+                        curl.exe -fsS http://127.0.0.1:5000/health >nul 2>&1
+
+                        if not errorlevel 1 (
+                            echo Health check PASSED.
+                            exit /b 0
+                        )
+
+                        echo Waiting for application...
+                        timeout /t 2 /nobreak >nul
+                    )
+
+                    echo Health check FAILED.
+                    exit /b 1
                 '''
             }
         }
@@ -91,19 +109,19 @@ pipeline {
 
     post {
         always {
-            junit allowEmptyResults: true, testResults: 'reports/*.xml'
-        }
-        success {
-            echo "NEXUS deployment completed successfully. Build #${BUILD_NUMBER}"
-        }
-        failure {
-            echo "NEXUS pipeline failed. Use the real Jenkins console with ChatGPT for root-cause analysis."
-        }
-        cleanup {
-            sh '''
-                docker image prune -f || true
-                rm -rf .venv || true
+            junit testResults: 'reports\\*.xml', allowEmptyResults: true
+
+            bat '''
+                docker ps -a
             '''
+        }
+
+        success {
+            echo 'NEXUS CI/CD pipeline completed successfully.'
+        }
+
+        failure {
+            echo 'NEXUS CI/CD pipeline failed. Check the console log for the failing stage.'
         }
     }
 }
